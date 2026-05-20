@@ -483,6 +483,80 @@ async fn test_pending_beacon_stop_not_applied_to_different_session() {
     assert_pending!(stream);
 }
 
+/// A new live `beacon_info` replacing a previous live session should implicitly
+/// stop the previous timeline item, even if no explicit stop event was sent.
+#[async_test]
+async fn test_replacing_live_beacon_stops_previous_item() {
+    let timeline = TestTimeline::new();
+    let mut stream = timeline.subscribe_events().await;
+    let old_start_id = event_id!("$old_start:example.org");
+    let new_start_id = event_id!("$new_start:example.org");
+    let old_session_ts = MilliSecondsSinceUnixEpoch::now();
+    let new_session_ts = MilliSecondsSinceUnixEpoch::now();
+
+    let old_content = BeaconInfoEventContent::new(
+        Some("Old session".to_owned()),
+        Duration::from_secs(3600),
+        true,
+        Some(old_session_ts),
+    );
+
+    timeline
+        .send_beacon_info(
+            &ALICE,
+            old_start_id,
+            Some("Old session".to_owned()),
+            Duration::from_secs(3600),
+            true,
+            Some(old_session_ts),
+        )
+        .await;
+
+    let old_item = assert_next_matches!(stream, VectorDiff::PushBack { value } => value);
+    assert_eq!(old_item.event_id().unwrap(), old_start_id);
+    assert!(old_item.content().as_live_location_state().unwrap().is_live());
+    assert_eq!(
+        old_item.content().as_live_location_state().unwrap().description(),
+        Some("Old session")
+    );
+
+    timeline
+        .send_beacon_info_with_prev_content(
+            &ALICE,
+            new_start_id,
+            Some("New session".to_owned()),
+            Duration::from_secs(3600),
+            true,
+            Some(new_session_ts),
+            old_content,
+        )
+        .await;
+
+    let new_item = assert_next_matches!(stream, VectorDiff::PushBack { value } => value);
+    assert_eq!(new_item.event_id().unwrap(), new_start_id);
+    assert!(
+        new_item.content().as_live_location_state().unwrap().is_live(),
+        "the replacement session should stay live"
+    );
+    assert_eq!(
+        new_item.content().as_live_location_state().unwrap().description(),
+        Some("New session")
+    );
+
+    let old_item = assert_next_matches!(stream, VectorDiff::Set { index: 0, value } => value);
+    assert_eq!(old_item.event_id().unwrap(), old_start_id);
+    assert!(
+        !old_item.content().as_live_location_state().unwrap().is_live(),
+        "the replaced live beacon should be considered stopped once a new session replaces it"
+    );
+    assert_eq!(
+        old_item.content().as_live_location_state().unwrap().description(),
+        Some("Old session")
+    );
+
+    assert_pending!(stream);
+}
+
 /// Duplicate beacon location updates (same timestamp) are de-duplicated.
 #[async_test]
 async fn test_duplicate_beacon_location_is_deduplicated() {
@@ -773,6 +847,28 @@ impl TestTimeline {
             .sender(sender)
             .state_key(sender)
             .event_id(event_id);
+        self.handle_live_event(event).await;
+    }
+
+    /// Convenience: send a `beacon_info` state event from `sender` with
+    /// `prev_content`, to model replacement of a previous session.
+    async fn send_beacon_info_with_prev_content(
+        &self,
+        sender: &ruma::UserId,
+        event_id: &EventId,
+        description: Option<String>,
+        duration: Duration,
+        live: bool,
+        ts: Option<MilliSecondsSinceUnixEpoch>,
+        prev_content: BeaconInfoEventContent,
+    ) {
+        let event = self
+            .factory
+            .beacon_info(description, duration, live, ts)
+            .sender(sender)
+            .state_key(sender)
+            .event_id(event_id)
+            .prev_content(prev_content);
         self.handle_live_event(event).await;
     }
 
