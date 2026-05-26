@@ -3468,6 +3468,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "matrix-sdk-contentscanner"
+version = "0.17.0"
+dependencies = [
+ "matrix-sdk",
+ "matrix-sdk-crypto",
+ "matrix-sdk-test",
+ "ruma",
+ "serde",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "matrix-sdk-crypto"
 version = "0.17.0"
 dependencies = [
@@ -3568,6 +3582,7 @@ dependencies = [
  "matrix-sdk",
  "matrix-sdk-base",
  "matrix-sdk-common",
+ "matrix-sdk-contentscanner",
  "matrix-sdk-ffi-macros",
  "matrix-sdk-ui",
  "mime",

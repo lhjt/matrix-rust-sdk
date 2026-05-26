@@ -29,6 +29,7 @@ use matrix_sdk::{
     cross_process_lock::CrossProcessLockConfig as SdkCrossProcessLockConfig,
     encryption::{BackupDownloadStrategy, EncryptionSettings},
     event_cache::EventCacheError,
+    media::{DefaultMediaFetcherBuilder, MediaFetcherBuilder},
     ruma::{ServerName, UserId},
     sliding_sync::{
         Error as MatrixSlidingSyncError, VersionBuilder as MatrixSlidingSyncVersionBuilder,
@@ -39,6 +40,7 @@ use matrix_sdk_base::{
     DmRoomDefinition,
     crypto::{CollectStrategy, DecryptionSettings, TrustRequirement},
 };
+use matrix_sdk_contentscanner::ContentScannerMediaFetcherBuilder;
 use ruma::api::error::{DeserializationError, FromHttpResponseError};
 use tracing::debug;
 
@@ -163,6 +165,8 @@ pub struct ClientBuilder {
     threading_support: ThreadingSupport,
 
     dm_room_definition: DmRoomDefinition,
+
+    media_fetcher_builder: Arc<dyn MediaFetcherBuilder>,
 }
 
 /// The timeout applies to each read operation, and resets after a successful
@@ -209,7 +213,15 @@ impl ClientBuilder {
             #[cfg(feature = "experimental-search")]
             search_index_store: None,
             dm_room_definition: DmRoomDefinition::MatrixSpec,
+            media_fetcher_builder: Arc::new(DefaultMediaFetcherBuilder::default()),
         })
+    }
+
+    pub fn enable_content_scanner(self: Arc<Self>, scanner_url: String) -> Arc<Self> {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.media_fetcher_builder =
+            Arc::new(ContentScannerMediaFetcherBuilder::new(scanner_url));
+        Arc::new(builder)
     }
 
     pub fn dm_room_definition(self: Arc<Self>, dm_room_definition: DmRoomDefinition) -> Arc<Self> {
@@ -542,7 +554,8 @@ impl ClientBuilder {
 
         inner_builder = inner_builder
             .dm_room_definition(builder.dm_room_definition)
-            .with_threading_support(builder.threading_support);
+            .with_threading_support(builder.threading_support)
+            .media_fetcher_builder(builder.media_fetcher_builder.clone());
 
         let sdk_client = inner_builder.build().await?;
 

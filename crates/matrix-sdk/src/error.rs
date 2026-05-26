@@ -46,8 +46,11 @@ use thiserror::Error;
 use url::ParseError as UrlParseError;
 
 use crate::{
-    authentication::oauth::OAuthError, cross_process_lock::CrossProcessLockError,
-    event_cache::EventCacheError, media::MediaError, room::reply::ReplyError,
+    authentication::oauth::OAuthError,
+    cross_process_lock::CrossProcessLockError,
+    event_cache::EventCacheError,
+    media::{MediaError, MediaFetcherError},
+    room::reply::ReplyError,
     sliding_sync::Error as SlidingSyncError,
 };
 
@@ -404,6 +407,10 @@ pub enum Error {
     /// We timed out attempting to complete an operation.
     #[error("timed out")]
     Timeout,
+
+    /// An error happened while trying to fetch a media URL
+    #[error(transparent)]
+    MediaFetcher(#[from] MediaFetcherError),
 }
 
 #[rustfmt::skip] // stop rustfmt breaking the `<code>` in docs across multiple lines

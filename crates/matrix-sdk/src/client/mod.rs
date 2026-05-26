@@ -109,7 +109,7 @@ use crate::{
     http_client::{HttpClient, SupportedAuthScheme, SupportedPathBuilder},
     latest_events::LatestEvents,
     live_locations_observer::BeaconInfoUpdate,
-    media::MediaError,
+    media::{MediaError, MediaFetcher, MediaFetcherBuilder},
     notification_settings::NotificationSettings,
     room::RoomMember,
     room_preview::RoomPreview,
@@ -411,6 +411,9 @@ pub(crate) struct ClientInner {
     #[cfg(feature = "e2e-encryption")]
     pub(crate) duplicate_key_upload_error_sender:
         broadcast::Sender<Option<DuplicateOneTimeKeyErrorMessage>>,
+
+    pub(crate) media_fetcher_builder: Arc<dyn MediaFetcherBuilder>,
+    pub(crate) media_fetcher: OnceCell<Arc<dyn MediaFetcher>>,
 }
 
 impl ClientInner {
@@ -438,6 +441,7 @@ impl ClientInner {
         cross_process_lock_config: CrossProcessLockConfig,
         #[cfg(feature = "experimental-search")] search_index_handler: SearchIndex,
         thread_subscription_catchup: OnceCell<Arc<ThreadSubscriptionCatchup>>,
+        media_fetcher_builder: Arc<dyn MediaFetcherBuilder>,
     ) -> Arc<Self> {
         let caches = ClientCaches {
             supported_versions: Cache::with_value(supported_versions),
@@ -481,10 +485,15 @@ impl ClientInner {
             task_monitor: TaskMonitor::new(),
             #[cfg(feature = "e2e-encryption")]
             duplicate_key_upload_error_sender: broadcast::channel(1).0,
+            media_fetcher_builder: media_fetcher_builder.clone(),
+            media_fetcher: OnceCell::new(),
         };
 
         #[allow(clippy::let_and_return)]
         let client = Arc::new(client);
+
+        let weak_client = WeakClient::from_inner(&client);
+        let _ = client.media_fetcher.set(media_fetcher_builder.build(weak_client));
 
         #[cfg(feature = "e2e-encryption")]
         client.e2ee.initialize_tasks(&client);
@@ -799,7 +808,7 @@ impl Client {
 
     /// Get the media manager of the client.
     pub fn media(&self) -> Media {
-        Media::new(self.clone())
+        Media::new(self.clone(), self.inner.media_fetcher.get().expect("Media fetcher").clone())
     }
 
     /// Get the pusher manager of the client.
@@ -3264,6 +3273,7 @@ impl Client {
                 #[cfg(feature = "experimental-search")]
                 self.inner.search_index.clone(),
                 self.inner.thread_subscription_catchup.clone(),
+                self.inner.media_fetcher_builder.clone(),
             )
             .await,
         };
@@ -3598,13 +3608,13 @@ impl Client {
 /// A weak reference to the inner client, useful when trying to get a handle
 /// on the owning client.
 #[derive(Clone, Debug)]
-pub(crate) struct WeakClient {
+pub struct WeakClient {
     client: Weak<ClientInner>,
 }
 
 impl WeakClient {
     /// Construct a [`WeakClient`] from a `Arc<ClientInner>`.
-    pub fn from_inner(client: &Arc<ClientInner>) -> Self {
+    pub(crate) fn from_inner(client: &Arc<ClientInner>) -> Self {
         Self { client: Arc::downgrade(client) }
     }
 

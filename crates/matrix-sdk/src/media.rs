@@ -17,14 +17,16 @@
 
 #[cfg(feature = "e2e-encryption")]
 use std::io::Read;
-use std::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 use std::{fmt, fs::File, path::Path};
+use std::{sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use eyeball::SharedObservable;
 use futures_util::future::try_join;
 use matrix_sdk_base::media::store::IgnoreMediaRetentionPolicy;
 pub use matrix_sdk_base::media::{store::MediaRetentionPolicy, *};
+use matrix_sdk_common::{SendOutsideWasm, SyncOutsideWasm};
 use mime::Mime;
 use ruma::{
     MilliSecondsSinceUnixEpoch, MxcUri, OwnedMxcUri, TransactionId, UInt,
@@ -38,12 +40,15 @@ use ruma::{
 };
 #[cfg(not(target_family = "wasm"))]
 use tempfile::{Builder as TempFileBuilder, NamedTempFile, TempDir};
+use thiserror::Error;
 #[cfg(not(target_family = "wasm"))]
 use tokio::{fs::File as TokioFile, io::AsyncWriteExt};
 
 use crate::{
-    Client, Error, Result, TransmissionProgress, attachment::Thumbnail,
-    client::futures::SendMediaUploadRequest, config::RequestConfig,
+    Client, Error, Result, TransmissionProgress,
+    attachment::Thumbnail,
+    client::{WeakClient, futures::SendMediaUploadRequest},
+    config::RequestConfig,
 };
 
 /// A conservative upload speed of 1Mbps
@@ -61,10 +66,17 @@ const MIN_UPLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 const LOCAL_MXC_SERVER_NAME: &str = "send-queue.localhost";
 
 /// A high-level API to interact with the media API.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Media {
     /// The underlying HTTP client.
     client: Client,
+    media_fetcher: Arc<dyn MediaFetcher>,
+}
+
+impl fmt::Debug for Media {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Media").finish()
+    }
 }
 
 /// A file handle that takes ownership of a media file on disk. When the handle
@@ -161,9 +173,49 @@ pub enum MediaError {
     FetchMaxUploadSizeFailed(String),
 }
 
+/// Errors that can happen when using a [`MediaFetcher`].
+#[derive(Error, Debug)]
+pub enum MediaFetcherError {
+    /// The associated client is no longer available.
+    #[error("The associated client is no longer available.")]
+    MissingClient,
+}
+
+/// A generic trait for fetching media content.
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+pub trait MediaFetcher: SendOutsideWasm + SyncOutsideWasm {
+    /// Fetches the media content for the given [`MediaRequestParameters`].
+    /// Returns either a byte array or an [`Error`].
+    async fn fetch_media_content(&self, request: &MediaRequestParameters)
+    -> Result<Vec<u8>, Error>;
+}
+
+/// A builder to instantiate a [`MediaFetcher`].
+pub trait MediaFetcherBuilder: SendOutsideWasm + SyncOutsideWasm {
+    /// Builds a [`MediaFetcher`] with the given [`WeakClient`].
+    fn build(&self, weak_client: WeakClient) -> Arc<dyn MediaFetcher>;
+}
+
+impl fmt::Debug for dyn MediaFetcherBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MediaFetcherBuilder")
+    }
+}
+
+/// A builder for [`DefaultMediaFetcher`].
+#[derive(Debug, Default)]
+pub struct DefaultMediaFetcherBuilder {}
+
+impl MediaFetcherBuilder for DefaultMediaFetcherBuilder {
+    fn build(&self, weak_client: WeakClient) -> Arc<dyn MediaFetcher> {
+        Arc::new(DefaultMediaFetcher::new(weak_client))
+    }
+}
+
 impl Media {
-    pub(crate) fn new(client: Client) -> Self {
-        Self { client }
+    pub(crate) fn new(client: Client, media_fetcher: Arc<dyn MediaFetcher>) -> Self {
+        Self { client, media_fetcher: media_fetcher.clone() }
     }
 
     /// Upload some media to the server.
@@ -434,90 +486,8 @@ impl Media {
             return Ok(content);
         }
 
-        let request_config = self
-            .client
-            .request_config()
-            // Downloading a file should have no timeout as we don't know the network connectivity
-            // available for the user or the file size
-            .timeout(Some(Duration::MAX));
-
-        // Use the authenticated endpoints when the server supports it.
-        let supported_versions = self.client.supported_versions().await?;
-
-        let use_auth = authenticated_media::get_content::v1::Request::PATH_BUILDER
-            .is_supported(&supported_versions);
-
-        let content: Vec<u8> = match &request.source {
-            MediaSource::Encrypted(file) => {
-                let content = if use_auth {
-                    let request =
-                        authenticated_media::get_content::v1::Request::from_uri(&file.url)?;
-                    self.client.send(request).with_request_config(request_config).await?.file
-                } else {
-                    #[allow(deprecated)]
-                    let request = media::get_content::v3::Request::from_url(&file.url)?;
-                    self.client.send(request).with_request_config(request_config).await?.file
-                };
-
-                #[cfg(feature = "e2e-encryption")]
-                let content = {
-                    let content_len = content.len();
-                    let mut cursor = std::io::Cursor::new(content);
-                    let mut reader = matrix_sdk_base::crypto::AttachmentDecryptor::new(
-                        &mut cursor,
-                        file.as_ref().clone().into(),
-                    )?;
-
-                    // Encrypted size should be the same as the decrypted size,
-                    // rounded up to a cipher block.
-                    let mut decrypted = Vec::with_capacity(content_len);
-
-                    reader.read_to_end(&mut decrypted)?;
-
-                    decrypted
-                };
-
-                content
-            }
-
-            MediaSource::Plain(uri) => {
-                if let MediaFormat::Thumbnail(settings) = &request.format {
-                    if use_auth {
-                        let mut request =
-                            authenticated_media::get_content_thumbnail::v1::Request::from_uri(
-                                uri,
-                                settings.width,
-                                settings.height,
-                            )?;
-                        request.method = Some(settings.method.clone());
-                        request.animated = Some(settings.animated);
-
-                        self.client.send(request).with_request_config(request_config).await?.file
-                    } else {
-                        #[allow(deprecated)]
-                        let request = {
-                            let mut request = media::get_content_thumbnail::v3::Request::from_url(
-                                uri,
-                                settings.width,
-                                settings.height,
-                            )?;
-                            request.method = Some(settings.method.clone());
-                            request.animated = Some(settings.animated);
-                            request
-                        };
-
-                        self.client.send(request).with_request_config(request_config).await?.file
-                    }
-                } else if use_auth {
-                    let request = authenticated_media::get_content::v1::Request::from_uri(uri)?;
-                    self.client.send(request).with_request_config(request_config).await?.file
-                } else {
-                    #[allow(deprecated)]
-                    let request = media::get_content::v3::Request::from_url(uri)?;
-                    self.client.send(request).with_request_config(request_config).await?.file
-                }
-            }
-        };
+        let fetcher = self.media_fetcher.clone();
+        let content = fetcher.fetch_media_content(request).await?;
 
         if use_cache {
             self.client
@@ -787,6 +757,117 @@ impl Media {
         uri.server_name()
             .is_ok_and(|server_name| server_name == LOCAL_MXC_SERVER_NAME)
             .then_some(uri)
+    }
+}
+
+/// A [`MediaFetcher`] that uses the default media/authenticated media endpoints
+/// to fetch new media.
+#[derive(Debug, Clone)]
+pub struct DefaultMediaFetcher {
+    weak_client: WeakClient,
+}
+
+impl DefaultMediaFetcher {
+    /// Instantiates a new [`DefaultMediaFetcher`] using the provided
+    /// [`WeakClient`].
+    pub fn new(weak_client: WeakClient) -> Self {
+        Self { weak_client }
+    }
+}
+
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+impl MediaFetcher for DefaultMediaFetcher {
+    async fn fetch_media_content(
+        &self,
+        request: &MediaRequestParameters,
+    ) -> Result<Vec<u8>, Error> {
+        let Some(client) = &self.weak_client.get() else {
+            return Err(Error::MediaFetcher(MediaFetcherError::MissingClient));
+        };
+        let request_config = client
+            .request_config()
+            // Downloading a file should have no timeout as we don't know the network connectivity
+            // available for the user or the file size
+            .timeout(Some(Duration::MAX));
+
+        // Use the authenticated endpoints when the server supports it.
+        let supported_versions = client.supported_versions().await?;
+
+        let use_auth = authenticated_media::get_content::v1::Request::PATH_BUILDER
+            .is_supported(&supported_versions);
+
+        match &request.source {
+            MediaSource::Encrypted(file) => {
+                let content = if use_auth {
+                    let request =
+                        authenticated_media::get_content::v1::Request::from_uri(&file.url)?;
+                    client.send(request).with_request_config(request_config).await?.file
+                } else {
+                    #[allow(deprecated)]
+                    let request = media::get_content::v3::Request::from_url(&file.url)?;
+                    client.send(request).with_request_config(request_config).await?.file
+                };
+
+                #[cfg(feature = "e2e-encryption")]
+                let content = {
+                    let content_len = content.len();
+                    let mut cursor = std::io::Cursor::new(content);
+                    let mut reader = matrix_sdk_base::crypto::AttachmentDecryptor::new(
+                        &mut cursor,
+                        file.as_ref().clone().into(),
+                    )?;
+
+                    // Encrypted size should be the same as the decrypted size,
+                    // rounded up to a cipher block.
+                    let mut decrypted = Vec::with_capacity(content_len);
+
+                    reader.read_to_end(&mut decrypted)?;
+
+                    decrypted
+                };
+
+                Ok(content)
+            }
+
+            MediaSource::Plain(uri) => {
+                if let MediaFormat::Thumbnail(settings) = &request.format {
+                    if use_auth {
+                        let mut request =
+                            authenticated_media::get_content_thumbnail::v1::Request::from_uri(
+                                uri,
+                                settings.width,
+                                settings.height,
+                            )?;
+                        request.method = Some(settings.method.clone());
+                        request.animated = Some(settings.animated);
+
+                        Ok(client.send(request).with_request_config(request_config).await?.file)
+                    } else {
+                        #[allow(deprecated)]
+                        let request = {
+                            let mut request = media::get_content_thumbnail::v3::Request::from_url(
+                                uri,
+                                settings.width,
+                                settings.height,
+                            )?;
+                            request.method = Some(settings.method.clone());
+                            request.animated = Some(settings.animated);
+                            request
+                        };
+
+                        Ok(client.send(request).with_request_config(request_config).await?.file)
+                    }
+                } else if use_auth {
+                    let request = authenticated_media::get_content::v1::Request::from_uri(uri)?;
+                    Ok(client.send(request).with_request_config(request_config).await?.file)
+                } else {
+                    #[allow(deprecated)]
+                    let request = media::get_content::v3::Request::from_url(uri)?;
+                    Ok(client.send(request).with_request_config(request_config).await?.file)
+                }
+            }
+        }
     }
 }
 
