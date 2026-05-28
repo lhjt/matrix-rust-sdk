@@ -20,13 +20,11 @@ use std::io::Read;
 #[cfg(not(target_family = "wasm"))]
 use std::{fmt, fs::File, path::Path};
 use std::{sync::Arc, time::Duration};
-
-use async_trait::async_trait;
 use eyeball::SharedObservable;
 use futures_util::future::try_join;
 use matrix_sdk_base::media::store::IgnoreMediaRetentionPolicy;
 pub use matrix_sdk_base::media::{store::MediaRetentionPolicy, *};
-use matrix_sdk_common::{SendOutsideWasm, SyncOutsideWasm};
+use matrix_sdk_common::{BoxFuture, SendOutsideWasm, SyncOutsideWasm};
 use mime::Mime;
 use ruma::{
     MilliSecondsSinceUnixEpoch, MxcUri, OwnedMxcUri, TransactionId, UInt,
@@ -182,13 +180,12 @@ pub enum MediaFetcherError {
 }
 
 /// A generic trait for fetching media content.
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 pub trait MediaFetcher: SendOutsideWasm + SyncOutsideWasm {
     /// Fetches the media content for the given [`MediaRequestParameters`].
     /// Returns either a byte array or an [`Error`].
-    async fn fetch_media_content(&self, request: &MediaRequestParameters)
-    -> Result<Vec<u8>, Error>;
+    #[allow(clippy::needless_lifetimes)]
+    fn fetch_media_content<'a>(&'a self, request: &'a MediaRequestParameters)
+    -> BoxFuture<'a, Result<Vec<u8>, Error>>;
 }
 
 /// A builder to instantiate a [`MediaFetcher`].
@@ -775,99 +772,100 @@ impl DefaultMediaFetcher {
     }
 }
 
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl MediaFetcher for DefaultMediaFetcher {
-    async fn fetch_media_content(
-        &self,
-        request: &MediaRequestParameters,
-    ) -> Result<Vec<u8>, Error> {
-        let Some(client) = &self.weak_client.get() else {
-            return Err(Error::MediaFetcher(MediaFetcherError::MissingClient));
-        };
-        let request_config = client
-            .request_config()
-            // Downloading a file should have no timeout as we don't know the network connectivity
-            // available for the user or the file size
-            .timeout(Some(Duration::MAX));
+    #[allow(clippy::needless_lifetimes)]
+    fn fetch_media_content<'a>(
+        &'a self,
+        request: &'a MediaRequestParameters,
+    ) -> BoxFuture<'a, Result<Vec<u8>, Error>> {
+        Box::pin(async move {
+            let Some(client) = &self.weak_client.get() else {
+                return Err(Error::MediaFetcher(MediaFetcherError::MissingClient));
+            };
+            let request_config = client
+                .request_config()
+                // Downloading a file should have no timeout as we don't know the network connectivity
+                // available for the user or the file size
+                .timeout(Some(Duration::MAX));
 
-        // Use the authenticated endpoints when the server supports it.
-        let supported_versions = client.supported_versions().await?;
+            // Use the authenticated endpoints when the server supports it.
+            let supported_versions = client.supported_versions().await?;
 
-        let use_auth = authenticated_media::get_content::v1::Request::PATH_BUILDER
-            .is_supported(&supported_versions);
+            let use_auth = authenticated_media::get_content::v1::Request::PATH_BUILDER
+                .is_supported(&supported_versions);
 
-        match &request.source {
-            MediaSource::Encrypted(file) => {
-                let content = if use_auth {
-                    let request =
-                        authenticated_media::get_content::v1::Request::from_uri(&file.url)?;
-                    client.send(request).with_request_config(request_config).await?.file
-                } else {
-                    #[allow(deprecated)]
-                    let request = media::get_content::v3::Request::from_url(&file.url)?;
-                    client.send(request).with_request_config(request_config).await?.file
-                };
+            match &request.source {
+                MediaSource::Encrypted(file) => {
+                    let content = if use_auth {
+                        let request =
+                            authenticated_media::get_content::v1::Request::from_uri(&file.url)?;
+                        client.send(request).with_request_config(request_config).await?.file
+                    } else {
+                        #[allow(deprecated)]
+                        let request = media::get_content::v3::Request::from_url(&file.url)?;
+                        client.send(request).with_request_config(request_config).await?.file
+                    };
 
-                #[cfg(feature = "e2e-encryption")]
-                let content = {
-                    let content_len = content.len();
-                    let mut cursor = std::io::Cursor::new(content);
-                    let mut reader = matrix_sdk_base::crypto::AttachmentDecryptor::new(
-                        &mut cursor,
-                        file.as_ref().clone().into(),
-                    )?;
+                    #[cfg(feature = "e2e-encryption")]
+                    let content = {
+                        let content_len = content.len();
+                        let mut cursor = std::io::Cursor::new(content);
+                        let mut reader = matrix_sdk_base::crypto::AttachmentDecryptor::new(
+                            &mut cursor,
+                            file.as_ref().clone().into(),
+                        )?;
 
-                    // Encrypted size should be the same as the decrypted size,
-                    // rounded up to a cipher block.
-                    let mut decrypted = Vec::with_capacity(content_len);
+                        // Encrypted size should be the same as the decrypted size,
+                        // rounded up to a cipher block.
+                        let mut decrypted = Vec::with_capacity(content_len);
 
-                    reader.read_to_end(&mut decrypted)?;
+                        reader.read_to_end(&mut decrypted)?;
 
-                    decrypted
-                };
+                        decrypted
+                    };
 
-                Ok(content)
-            }
+                    Ok(content)
+                }
 
-            MediaSource::Plain(uri) => {
-                if let MediaFormat::Thumbnail(settings) = &request.format {
-                    if use_auth {
-                        let mut request =
-                            authenticated_media::get_content_thumbnail::v1::Request::from_uri(
-                                uri,
-                                settings.width,
-                                settings.height,
-                            )?;
-                        request.method = Some(settings.method.clone());
-                        request.animated = Some(settings.animated);
+                MediaSource::Plain(uri) => {
+                    if let MediaFormat::Thumbnail(settings) = &request.format {
+                        if use_auth {
+                            let mut request =
+                                authenticated_media::get_content_thumbnail::v1::Request::from_uri(
+                                    uri,
+                                    settings.width,
+                                    settings.height,
+                                )?;
+                            request.method = Some(settings.method.clone());
+                            request.animated = Some(settings.animated);
 
+                            Ok(client.send(request).with_request_config(request_config).await?.file)
+                        } else {
+                            #[allow(deprecated)]
+                            let request = {
+                                let mut request = media::get_content_thumbnail::v3::Request::from_url(
+                                    uri,
+                                    settings.width,
+                                    settings.height,
+                                )?;
+                                request.method = Some(settings.method.clone());
+                                request.animated = Some(settings.animated);
+                                request
+                            };
+
+                            Ok(client.send(request).with_request_config(request_config).await?.file)
+                        }
+                    } else if use_auth {
+                        let request = authenticated_media::get_content::v1::Request::from_uri(uri)?;
                         Ok(client.send(request).with_request_config(request_config).await?.file)
                     } else {
                         #[allow(deprecated)]
-                        let request = {
-                            let mut request = media::get_content_thumbnail::v3::Request::from_url(
-                                uri,
-                                settings.width,
-                                settings.height,
-                            )?;
-                            request.method = Some(settings.method.clone());
-                            request.animated = Some(settings.animated);
-                            request
-                        };
-
+                        let request = media::get_content::v3::Request::from_url(uri)?;
                         Ok(client.send(request).with_request_config(request_config).await?.file)
                     }
-                } else if use_auth {
-                    let request = authenticated_media::get_content::v1::Request::from_uri(uri)?;
-                    Ok(client.send(request).with_request_config(request_config).await?.file)
-                } else {
-                    #[allow(deprecated)]
-                    let request = media::get_content::v3::Request::from_url(uri)?;
-                    Ok(client.send(request).with_request_config(request_config).await?.file)
                 }
             }
-        }
+        })
     }
 }
 

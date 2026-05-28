@@ -4,13 +4,7 @@ use api::{
     encrypted::DownloadAndScanEncryptedMediaRequest, public_server_key::PublicServerKeyRequest,
     unencrypted::DownloadAndScanMediaRequest,
 };
-use matrix_sdk::{
-    Error, IdParseError, WeakClient, async_trait,
-    encryption::vodozemac::pk_encryption::Message,
-    locks::Mutex,
-    media::{MediaFetcher, MediaFetcherBuilder, MediaFetcherError, MediaRequestParameters},
-    ruma::events::room::MediaSource,
-};
+use matrix_sdk::{Error, IdParseError, WeakClient, encryption::vodozemac::pk_encryption::Message, locks::Mutex, media::{MediaFetcher, MediaFetcherBuilder, MediaFetcherError, MediaRequestParameters}, ruma::events::room::MediaSource, BoxFuture};
 use matrix_sdk_crypto::olm::Curve25519PublicKey;
 use ruma::{
     events::room::EncryptedFile,
@@ -142,14 +136,15 @@ pub struct ContentScannerMediaFetcher {
     pub content_scanner: ContentScanner,
 }
 
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl MediaFetcher for ContentScannerMediaFetcher {
-    async fn fetch_media_content(
-        &self,
-        request: &MediaRequestParameters,
-    ) -> matrix_sdk::Result<Vec<u8>, Error> {
-        Ok(self.content_scanner.get_media(&request.source).await?.content)
+    #[allow(clippy::needless_lifetimes)]
+    fn fetch_media_content<'a>(
+        &'a self,
+        request: &'a MediaRequestParameters,
+    ) -> BoxFuture<'a, matrix_sdk::Result<Vec<u8>, Error>> {
+        Box::pin(async move {
+            Ok(self.content_scanner.get_media(&request.source).await?.content)
+        })
     }
 }
 
