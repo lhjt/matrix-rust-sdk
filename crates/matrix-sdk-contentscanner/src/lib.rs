@@ -4,7 +4,13 @@ use api::{
     encrypted::DownloadAndScanEncryptedMediaRequest, public_server_key::PublicServerKeyRequest,
     unencrypted::DownloadAndScanMediaRequest,
 };
-use matrix_sdk::{Error, IdParseError, WeakClient, encryption::vodozemac::pk_encryption::Message, locks::Mutex, media::{MediaFetcher, MediaFetcherBuilder, MediaFetcherError, MediaRequestParameters}, ruma::events::room::MediaSource, BoxFuture};
+use matrix_sdk::{
+    BoxFuture, Error, IdParseError, WeakClient,
+    encryption::vodozemac::pk_encryption::Message,
+    locks::Mutex,
+    media::{MediaFetcher, MediaFetcherBuilder, MediaFetcherError, MediaRequestParameters},
+    ruma::events::room::MediaSource,
+};
 use matrix_sdk_crypto::olm::Curve25519PublicKey;
 use ruma::{
     events::room::EncryptedFile,
@@ -142,9 +148,7 @@ impl MediaFetcher for ContentScannerMediaFetcher {
         &'a self,
         request: &'a MediaRequestParameters,
     ) -> BoxFuture<'a, matrix_sdk::Result<Vec<u8>, Error>> {
-        Box::pin(async move {
-            Ok(self.content_scanner.get_media(&request.source).await?.content)
-        })
+        Box::pin(async move { Ok(self.content_scanner.get_media(&request.source).await?.content) })
     }
 }
 
@@ -192,8 +196,17 @@ mod tests {
         let client =
             server.client_builder().server_versions(vec![MatrixVersion::V1_11]).build().await;
 
+        let content_scanner_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_matrix/media_proxy/unstable/public_key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "public_key": "1234567890"
+            })))
+            .mount(&content_scanner_server)
+            .await;
+
         let content_scanner =
-            ContentScanner::new("http://localhost:8080", WeakClient::from_client(&client));
+            ContentScanner::new(content_scanner_server.uri(), WeakClient::from_client(&client));
         content_scanner.fetch_public_server_key().await.expect("Load public key");
     }
 
@@ -204,7 +217,6 @@ mod tests {
             server.client_builder().server_versions(vec![MatrixVersion::V1_11]).build().await;
 
         let content_scanner_server = MockServer::start().await;
-
         Mock::given(method("GET"))
             .and(path_regex(r"/_matrix/media_proxy/unstable/download/.+/.+"))
             .and(header_exists("Authorization"))
@@ -228,7 +240,6 @@ mod tests {
             server.client_builder().server_versions(vec![MatrixVersion::V1_11]).build().await;
 
         let content_scanner_server = MockServer::start().await;
-
         Mock::given(method("GET"))
             .and(path_regex(r"/_matrix/media_proxy/unstable/download/.+/.+"))
             .and(header_exists("Authorization"))
@@ -259,7 +270,6 @@ mod tests {
             server.client_builder().server_versions(vec![MatrixVersion::V1_11]).build().await;
 
         let content_scanner_server = MockServer::start().await;
-
         Mock::given(method("POST"))
             .and(path("/_matrix/media_proxy/unstable/download_encrypted"))
             .and(header_exists("Authorization"))

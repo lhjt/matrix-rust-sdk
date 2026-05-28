@@ -17,9 +17,10 @@
 
 #[cfg(feature = "e2e-encryption")]
 use std::io::Read;
+use std::{fmt, sync::Arc, time::Duration};
 #[cfg(not(target_family = "wasm"))]
-use std::{fmt, fs::File, path::Path};
-use std::{sync::Arc, time::Duration};
+use std::{fs::File, path::Path};
+
 use eyeball::SharedObservable;
 use futures_util::future::try_join;
 use matrix_sdk_base::media::store::IgnoreMediaRetentionPolicy;
@@ -38,7 +39,6 @@ use ruma::{
 };
 #[cfg(not(target_family = "wasm"))]
 use tempfile::{Builder as TempFileBuilder, NamedTempFile, TempDir};
-use thiserror::Error;
 #[cfg(not(target_family = "wasm"))]
 use tokio::{fs::File as TokioFile, io::AsyncWriteExt};
 
@@ -172,7 +172,7 @@ pub enum MediaError {
 }
 
 /// Errors that can happen when using a [`MediaFetcher`].
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum MediaFetcherError {
     /// The associated client is no longer available.
     #[error("The associated client is no longer available.")]
@@ -182,10 +182,12 @@ pub enum MediaFetcherError {
 /// A generic trait for fetching media content.
 pub trait MediaFetcher: SendOutsideWasm + SyncOutsideWasm {
     /// Fetches the media content for the given [`MediaRequestParameters`].
-    /// Returns either a byte array or an [`Error`].
+    /// Returns either a byte array or an [`crate::Error`].
     #[allow(clippy::needless_lifetimes)]
-    fn fetch_media_content<'a>(&'a self, request: &'a MediaRequestParameters)
-    -> BoxFuture<'a, Result<Vec<u8>, Error>>;
+    fn fetch_media_content<'a>(
+        &'a self,
+        request: &'a MediaRequestParameters,
+    ) -> BoxFuture<'a, Result<Vec<u8>, Error>>;
 }
 
 /// A builder to instantiate a [`MediaFetcher`].
@@ -784,8 +786,8 @@ impl MediaFetcher for DefaultMediaFetcher {
             };
             let request_config = client
                 .request_config()
-                // Downloading a file should have no timeout as we don't know the network connectivity
-                // available for the user or the file size
+                // Downloading a file should have no timeout as we don't know the network
+                // connectivity available for the user or the file size
                 .timeout(Some(Duration::MAX));
 
             // Use the authenticated endpoints when the server supports it.
@@ -843,11 +845,12 @@ impl MediaFetcher for DefaultMediaFetcher {
                         } else {
                             #[allow(deprecated)]
                             let request = {
-                                let mut request = media::get_content_thumbnail::v3::Request::from_url(
-                                    uri,
-                                    settings.width,
-                                    settings.height,
-                                )?;
+                                let mut request =
+                                    media::get_content_thumbnail::v3::Request::from_url(
+                                        uri,
+                                        settings.width,
+                                        settings.height,
+                                    )?;
                                 request.method = Some(settings.method.clone());
                                 request.animated = Some(settings.animated);
                                 request
