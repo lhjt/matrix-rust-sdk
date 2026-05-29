@@ -16,8 +16,11 @@ use ruma::{
     events::room::EncryptedFile,
     serde::{Base64, base64::Standard},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing::trace;
+
+#[cfg(feature = "uniffi")]
+uniffi::setup_scaffolding!();
 
 use crate::api::DownloadAndScanMediaResponse;
 
@@ -169,12 +172,38 @@ impl MediaFetcherBuilder for ContentScannerMediaFetcherBuilder {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ContentScannerError {
+    pub info: String,
+    pub reason: ErrorReason,
+}
+
+#[allow(non_camel_case_types)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[derive(Clone, Debug, Deserialize)]
+pub enum ErrorReason {
+    MCS_MALFORMED_JSON,
+    MCS_MEDIA_FAILED_TO_DECRYPT,
+    M_MISSING_TOKEN,
+    M_UNKNOWN_TOKEN,
+    M_NOT_FOUND,
+    MCS_MEDIA_NOT_CLEAN,
+    MCS_MIME_TYPE_FORBIDDEN,
+    MCS_BAD_DECRYPTION,
+    M_UNKNOWN,
+    MCS_MEDIA_REQUEST_FAILED,
+}
+
 #[cfg(test)]
 mod tests {
-    use matrix_sdk::{WeakClient, test_utils::mocks::MatrixMockServer};
+    use assert_matches2::assert_matches;
+    use matrix_sdk::{HttpError, RumaApiError, WeakClient, test_utils::mocks::MatrixMockServer};
     use matrix_sdk_test::async_test;
     use ruma::{
-        api::MatrixVersion,
+        api::{
+            MatrixVersion,
+            error::{ErrorBody, FromHttpResponseError},
+        },
         events::room::{
             EncryptedFile, EncryptedFileHash, EncryptedFileHashes, EncryptedFileInfo, MediaSource,
             V2EncryptedFileInfo,
@@ -183,12 +212,13 @@ mod tests {
         owned_mxc_uri,
         serde::Base64,
     };
+    use serde::Deserialize;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header_exists, method, path, path_regex},
     };
 
-    use crate::ContentScanner;
+    use crate::{ContentScanner, ContentScannerError, ErrorReason};
 
     #[async_test]
     async fn test_fetch_public_key() {
@@ -339,5 +369,28 @@ mod tests {
             client_error.to_string(),
             "[403] {\"info\":\"File type: application/octet-stream not allowed\",\"reason\":\"MCS_MIME_TYPE_FORBIDDEN\"}"
         );
+    }
+
+    #[test]
+    fn test_error_mapping() {
+        let error = HttpError::Api(Box::new(FromHttpResponseError::Server(
+            RumaApiError::MatrixError(ruma::api::error::Error::new(
+                StatusCode::FORBIDDEN,
+                ErrorBody::Json(json!({
+                    "info": "***VIRUS DETECTED***",
+                    "reason": "MCS_MEDIA_NOT_CLEAN"
+                })),
+            )),
+        )));
+        let api_error = error.as_client_api_error().expect("error as api error");
+        assert_eq!(
+            api_error.to_string(),
+            "[403] {\"info\":\"***VIRUS DETECTED***\",\"reason\":\"MCS_MEDIA_NOT_CLEAN\"}"
+        );
+        assert_matches!(&api_error.body, ErrorBody::Json(json_body));
+        let content_scanner_error =
+            ContentScannerError::deserialize(json_body).expect("deserialize");
+        assert_eq!(content_scanner_error.info, "***VIRUS DETECTED***");
+        assert_matches!(content_scanner_error.reason, ErrorReason::MCS_MEDIA_NOT_CLEAN);
     }
 }

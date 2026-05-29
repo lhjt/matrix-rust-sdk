@@ -3471,6 +3471,7 @@ dependencies = [
 name = "matrix-sdk-contentscanner"
 version = "0.17.0"
 dependencies = [
+ "assert_matches2",
  "matrix-sdk",
  "matrix-sdk-crypto",
  "matrix-sdk-test",
@@ -3478,6 +3479,7 @@ dependencies = [
  "serde",
  "tokio",
  "tracing",
+ "uniffi",
  "wiremock",
 ]
 

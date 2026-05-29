@@ -7,13 +7,18 @@ edition = "2024"
 license = "Apache-2.0"
 rust-version.workspace = true
 
+[features]
+uniffi = ["dep:uniffi", "matrix-sdk/uniffi"]
+
 [dependencies]
+assert_matches2.workspace = true
 matrix-sdk = { workspace = true, features = ["testing", "e2e-encryption"] }
 matrix-sdk-crypto.workspace = true
 ruma = { workspace = true, features = ["client-api"] }
 serde.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 tracing.workspace = true
+uniffi = { workspace = true, optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 matrix-sdk-test.workspace = true
