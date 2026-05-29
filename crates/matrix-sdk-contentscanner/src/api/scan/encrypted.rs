@@ -23,6 +23,7 @@ metadata! {
     },
 }
 
+/// A request to scan an encrypted media file using the content scanner.
 #[derive(Debug, Clone)]
 pub struct EncryptedMediaScanRequest {
     scanner_url: String,

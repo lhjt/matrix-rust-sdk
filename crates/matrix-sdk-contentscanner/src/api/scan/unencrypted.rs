@@ -10,7 +10,7 @@ use ruma::{
     metadata,
 };
 
-pub(crate) use crate::api::scan::MediaScanResponse;
+use crate::api::scan::MediaScanResponse;
 
 metadata! {
     @for MediaScanRequest,
@@ -22,6 +22,7 @@ metadata! {
     },
 }
 
+/// A request to scan an unencrypted media file using the content scanner.
 #[derive(Debug, Clone)]
 pub struct MediaScanRequest {
     scanner_url: String,

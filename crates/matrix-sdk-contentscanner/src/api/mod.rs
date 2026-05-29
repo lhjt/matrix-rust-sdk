@@ -38,6 +38,8 @@ impl IncomingResponse for DownloadAndScanMediaResponse {
     }
 }
 
+/// Creates an [`EncryptedFileRequest`] from [`EncryptedFile`], using the
+/// optionally provided public key if present.
 pub(crate) fn encrypted_file_request_from(
     public_key: &Option<Curve25519PublicKey>,
     encrypted_file: &EncryptedFile,

@@ -8,9 +8,12 @@ use serde::Deserialize;
 pub mod encrypted;
 pub mod unencrypted;
 
+/// A media scan response containing the result of the scan.
 #[derive(Debug, Deserialize)]
 pub struct MediaScanResponse {
+    /// Whether the media is clean or contained something dangerous.
     pub clean: bool,
+    /// Extra information about the scan.
     pub info: String,
 }
 

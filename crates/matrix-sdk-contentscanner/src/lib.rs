@@ -24,12 +24,15 @@ use tracing::trace;
 #[cfg(feature = "uniffi")]
 uniffi::setup_scaffolding!();
 
-use api::scan::unencrypted::{MediaScanRequest, MediaScanResponse};
-
-use crate::api::{DownloadAndScanMediaResponse, scan::encrypted::EncryptedMediaScanRequest};
+pub use crate::api::scan::MediaScanResponse;
+use crate::api::{
+    DownloadAndScanMediaResponse,
+    scan::{encrypted::EncryptedMediaScanRequest, unencrypted::MediaScanRequest},
+};
 
 mod api;
 
+/// A helper component to download and scan media from a content scanner server.
 #[derive(Debug)]
 pub struct ContentScanner {
     scanner_url: String,
@@ -38,6 +41,8 @@ pub struct ContentScanner {
 }
 
 impl ContentScanner {
+    /// Instantiate a new [`ContentScanner`] using the `scanner_url` and a lazy
+    /// [`WeakClient`].
     pub fn new(scanner_url: impl Into<String>, weak_client: WeakClient) -> Self {
         Self {
             scanner_url: scanner_url.into(),
@@ -110,6 +115,8 @@ impl ContentScanner {
         }
     }
 
+    /// Scan a media source, returning a [`MediaScanResponse`] with the scan
+    /// result, or an error if something failed when trying to scan the media.
     pub async fn scan(&self, media_source: &MediaSource) -> Result<MediaScanResponse, Error> {
         let Some(client) = self.weak_client.get() else {
             return Err(Error::MediaFetcher(MediaFetcherError::MissingClient));
@@ -178,6 +185,7 @@ impl EncryptedFileRequest {
     }
 }
 
+/// A media fetcher that uses the content scanner to download and scan media.
 pub struct ContentScannerMediaFetcher {
     pub content_scanner: ContentScanner,
 }
@@ -192,11 +200,14 @@ impl MediaFetcher for ContentScannerMediaFetcher {
     }
 }
 
+/// A builder for the [`ContentScannerMediaFetcher`].
 pub struct ContentScannerMediaFetcherBuilder {
     scanner_url: String,
 }
 
 impl ContentScannerMediaFetcherBuilder {
+    /// Create a new instance of [`ContentScannerMediaFetcherBuilder`] pointing
+    /// to the provided `scanner_url`.
     pub fn new(scanner_url: impl Into<String>) -> Self {
         Self { scanner_url: scanner_url.into() }
     }
@@ -209,25 +220,37 @@ impl MediaFetcherBuilder for ContentScannerMediaFetcherBuilder {
     }
 }
 
+/// A content scanner error.
 #[derive(Debug, Deserialize)]
 pub struct ContentScannerError {
     pub info: String,
     pub reason: ErrorReason,
 }
 
+/// The reason for the content scanner error.
 #[allow(non_camel_case_types)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 #[derive(Clone, Debug, Deserialize)]
 pub enum ErrorReason {
+    /// The JSON file is malformed.
     MCS_MALFORMED_JSON,
+    /// The media could not be decrypted.
     MCS_MEDIA_FAILED_TO_DECRYPT,
+    /// No access token was provided.
     M_MISSING_TOKEN,
+    /// The access token provided is invalid.
     M_UNKNOWN_TOKEN,
+    /// The media was not found.
     M_NOT_FOUND,
+    /// The media has some potentially dangerous content.
     MCS_MEDIA_NOT_CLEAN,
+    /// The media has been blocked by the server because of its mime type.
     MCS_MIME_TYPE_FORBIDDEN,
+    /// The used public key is wrong.
     MCS_BAD_DECRYPTION,
+    /// An unknown error occurred.
     M_UNKNOWN,
+    /// The server failed to request media from the media repo.
     MCS_MEDIA_REQUEST_FAILED,
 }
 
