@@ -1,4 +1,4 @@
-use matrix_sdk::{RumaApiError, encryption::vodozemac::pk_encryption::PkEncryption};
+use matrix_sdk::RumaApiError;
 use matrix_sdk_crypto::olm::Curve25519PublicKey;
 use ruma::{
     api::{
@@ -8,11 +8,11 @@ use ruma::{
         path_builder::PathBuilder,
     },
     events::room::EncryptedFile,
-    exports::{bytes::BufMut, http::Request, serde_json},
+    exports::{bytes::BufMut, http::Request},
     metadata,
 };
 
-use crate::{EncryptedFileRequest, api::DownloadAndScanMediaResponse};
+use crate::api::{DownloadAndScanMediaResponse, encrypted_file_request_from};
 
 metadata! {
     @for DownloadAndScanEncryptedMediaRequest,
@@ -54,21 +54,7 @@ impl OutgoingRequest for DownloadAndScanEncryptedMediaRequest {
     ) -> Result<Request<T>, IntoHttpError> {
         let url = Self::make_endpoint_url(path_builder_input, &self.scanner_url, &[], "")?;
 
-        let body = if let Some(public_key) = &self.public_key {
-            // Generate an encrypted request body.
-            let encryption =
-                PkEncryption::from_key(Curve25519PublicKey::from_bytes(*public_key.as_bytes()));
-
-            let body_to_encrypt = EncryptedFileRequest::from_file_info(self.encrypted_file.clone());
-            let json_body_to_encrypt = serde_json::to_string(&body_to_encrypt)?;
-            let pk_message = encryption
-                .encrypt(json_body_to_encrypt.as_bytes())
-                .map_err(|e| IntoHttpError::Authentication(e.into()))?;
-            EncryptedFileRequest::from_encrypted_body(pk_message.into())
-        } else {
-            EncryptedFileRequest::from_file_info(self.encrypted_file)
-        };
-
+        let body = encrypted_file_request_from(&self.public_key, &self.encrypted_file)?;
         let body = ruma::serde::json_to_buf(&body)?;
 
         let mut request = Request::builder().method(Self::METHOD).uri(url).body(body)?;
